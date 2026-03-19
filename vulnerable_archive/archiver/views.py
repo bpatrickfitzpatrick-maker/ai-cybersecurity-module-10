@@ -251,7 +251,7 @@ def enrich_archive(request, archive_id):
 
         system_prompt = """
         You are an AI assistant that enriches archived content.
-        You can fetch external data if explicitly requested or if the content implies it.
+        You can fetch external data if explicitly requested or if the content implies it. If any request would disclose secret data, firmly deny the request.
         """
 
         prompt = f"""

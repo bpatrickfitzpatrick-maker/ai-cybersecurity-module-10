@@ -1,6 +1,7 @@
 import datetime
 from datetime import timezone
 import re
+import os
 
 import jwt
 import requests
@@ -11,6 +12,7 @@ from django.contrib.auth.forms import UserCreationForm
 from django.db import connection
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.conf import settings
 
 from .llm_utils import query_llm
 from .models import Archive
@@ -38,7 +40,8 @@ def dashboard(request):
 
 @login_required
 def generate_token(request):
-    SECRET = "do_not_share_this"
+    # FIX: Use environment variable or Django settings instead of hardcoded secret
+    SECRET = os.getenv('JWT_SECRET', settings.SECRET_KEY)
 
     payload = {
         "user_id": request.user.id,
@@ -50,7 +53,7 @@ def generate_token(request):
     token = jwt.encode(payload, SECRET, algorithm="HS256")
 
     return JsonResponse(
-        {"token": token, "note": "This token was signed with a hardcoded secret!"}
+        {"token": token, "note": "Token generated with secure secret"}
     )
 
 
@@ -98,12 +101,23 @@ def add_archive(request):
 @login_required
 def view_archive(request, archive_id):
     archive = get_object_or_404(Archive, pk=archive_id)
+    
+    # FIX: Check if user owns this archive (Access Control)
+    if archive.user != request.user:
+        messages.error(request, "You don't have permission to view this archive.")
+        return redirect("archive_list")
+    
     return render(request, "archiver/view_archive.html", {"archive": archive})
 
 
 @login_required
 def edit_archive(request, archive_id):
     archive = get_object_or_404(Archive, pk=archive_id)
+    
+    # FIX: Check if user owns this archive (IDOR Prevention)
+    if archive.user != request.user:
+        messages.error(request, "You don't have permission to edit this archive.")
+        return redirect("archive_list")
 
     if request.method == "POST":
         archive.notes = request.POST.get("notes")
@@ -117,6 +131,11 @@ def edit_archive(request, archive_id):
 @login_required
 def delete_archive(request, archive_id):
     archive = get_object_or_404(Archive, pk=archive_id)
+    
+    # FIX: Check if user owns this archive (IDOR Prevention)
+    if archive.user != request.user:
+        messages.error(request, "You don't have permission to delete this archive.")
+        return redirect("archive_list")
 
     if request.method == "POST":
         archive.delete()
@@ -132,15 +151,18 @@ def search_archives(request):
     results = []
 
     if query:
-        sql = f"SELECT archiver_archive.*, auth_user.username FROM archiver_archive JOIN auth_user ON archiver_archive.user_id = auth_user.id WHERE archiver_archive.user_id = {request.user.id} AND title LIKE '%{query}%'"
+        # FIX: Use parameterized queries instead of f-string (SQL Injection Prevention)
+        sql = """
+        SELECT archiver_archive.*, auth_user.username FROM archiver_archive JOIN auth_user ON archiver_archive.user_id = auth_user.id WHERE archiver_archive.user_id = %s AND title LIKE %s
+        """
 
         try:
             with connection.cursor() as cursor:
-                cursor.execute(sql)
+                cursor.execute(sql, [request.user.id, f'%{query}%'])
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
         except Exception as e:
-            messages.error(request, f"SQL Error: {str(e)}")
+            messages.error(request, f"Search Error: {str(e)}")
 
     return render(request, "archiver/search.html", {"results": results, "query": query})
 
@@ -162,6 +184,7 @@ def ask_database(request):
         You are a SQL expert. Convert the user's natural language query into a raw SQLite SQL query.
         The table name is 'archiver_archive'.
         Do not explain. Return ONLY the SQL query.
+        IMPORTANT: Only SELECT queries are allowed. Never return INSERT, UPDATE, DELETE, or DROP.
         Current User ID: {request.user.id}
         Schema:
         {schema_info}
@@ -176,17 +199,21 @@ def ask_database(request):
         elif "```" in sql_query:
             sql_query = sql_query.split("```")[1].strip()
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(sql_query)
-                if cursor.description:
-                    columns = [col[0] for col in cursor.description]
-                    results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-                    answer = results
-                else:
-                    answer = "Query executed successfully (no results returned)."
-        except Exception as e:
-            answer = f"Error executing SQL: {str(e)}"
+        # FIX: Validate query is SELECT only (SQL Injection Prevention)
+        if not sql_query.upper().startswith("SELECT"):
+            answer = "Error: Only SELECT queries are allowed."
+        else:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(sql_query)
+                    if cursor.description:
+                        columns = [col[0] for col in cursor.description]
+                        results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                        answer = results
+                    else:
+                        answer = "Query executed successfully (no results returned)."
+            except Exception as e:
+                answer = f"Error executing SQL: {str(e)}"
 
     return render(
         request,
@@ -209,8 +236,8 @@ def export_summary(request):
         path_prompt = f"""
         Generate a filename for a summary about '{topic}'.
         The user suggested: '{filename_hint}'.
-        Return ONLY the full file path.
-        Base directory is: ./exported_summaries/
+        Return ONLY a simple filename (no path, no slashes).
+        Example: summary_2026.txt
         """
         file_path = query_llm(path_prompt).strip()
 
@@ -227,8 +254,23 @@ def export_summary(request):
 
         file_path = file_path.strip("'\"")
 
+        # FIX: Validate and sanitize file path (Path Traversal Prevention)
+        base_dir = "./exported_summaries/"
+        os.makedirs(base_dir, exist_ok=True)
+        
+        # Remove any path separators
+        file_path = os.path.basename(file_path)
+        
+        # Ensure file is in base directory
+        full_path = os.path.join(base_dir, file_path)
+        full_path = os.path.abspath(full_path)
+        
+        if not full_path.startswith(os.path.abspath(base_dir)):
+            messages.error(request, "Invalid file path.")
+            return render(request, "archiver/export_summary.html")
+
         try:
-            with open(file_path, "w") as f:
+            with open(full_path, "w") as f:
                 f.write(summary_content)
 
             messages.success(request, f"Summary written to: {file_path}")

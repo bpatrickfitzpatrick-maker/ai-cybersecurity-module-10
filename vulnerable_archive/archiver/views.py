@@ -291,7 +291,12 @@ def enrich_archive(request, archive_id):
         )
 
         # FIX: Remove hidden content to prevent prompt injection
-        sanitized_content = re.sub(r'<div style="display:none">.*?</div>', '', archive.content, flags=re.DOTALL)
+        # Remove display:none divs
+        sanitized_content = re.sub(r'<div\s+style="display\s*:\s*none"[^>]*>.*?</div>', '', archive.content, flags=re.DOTALL | re.IGNORECASE)
+        # Also remove HTML comments that might contain instructions
+        sanitized_content = re.sub(r'<!--.*?-->', '', sanitized_content, flags=re.DOTALL)
+        # Remove any other hidden elements
+        sanitized_content = re.sub(r'<[^>]*style="[^>]*display\s*:\s*none[^>]*"[^>]*>.*?</[^>]*>', '', sanitized_content, flags=re.DOTALL | re.IGNORECASE)
 
         system_prompt = """
         You are an AI assistant that enriches archived content.

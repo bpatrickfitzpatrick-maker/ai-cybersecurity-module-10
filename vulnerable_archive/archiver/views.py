@@ -319,25 +319,29 @@ def enrich_archive(request, archive_id):
         {archive.notes}
         """
 
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "fetch_url",
-                    "description": "Fetch data from a URL",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {
-                                "type": "string",
-                                "description": "The URL to fetch",
-                            }
+        # FIX: Do NOT provide tools to LLM - tools enable prompt injection attacks
+        # Only use tools if user explicitly requests it
+        tools = None
+        if "fetch" in user_instruction.lower() or "url" in user_instruction.lower():
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "fetch_url",
+                        "description": "Fetch data from a URL",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "description": "The URL to fetch",
+                                }
+                            },
+                            "required": ["url"],
                         },
-                        "required": ["url"],
                     },
-                },
-            }
-        ]
+                }
+            ]
 
         # response is now a message dict when tools are provided
         message = query_llm(prompt, system_instruction=system_prompt, tools=tools)
